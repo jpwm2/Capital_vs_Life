@@ -4,15 +4,27 @@ import queue
 import time as sys_time
 import random
 
+
 class MoneyTree:
-    pass
+    stamina = 1
+    times = 1
+
+    def recover(self, workbench):
+        self.stamina = workbench.stamina(self.times)
+
 
 class Land(MoneyTree):
     harvest_amount = 4
 
+    def __init__(self):
+        super().__init__()
+
 
 class Machine(MoneyTree):
     production_amount = 1
+
+    def __init__(self):
+        super().__init__()
 
 
 class Person(MoneyTree):
@@ -42,20 +54,14 @@ class Person(MoneyTree):
     product = 0
     utility = 0
     children = []
-    stamina = 1
 
     def __init__(self, individuality_seed):
+        super().__init__()
         self.individuality = self.Individuality(individuality_seed)
 
     def get_stamina(self):
         return self.stamina
 
-class Time:
-    flag = True
-
-    def use(self):
-        self.flag = False
-        return True
 
 class InvestmentExchange:
     class InvestmentMarket:
@@ -102,30 +108,39 @@ class LoanBuyExchange(LoanExchange):
         super().__init__(number)
 
 
-class LaborExchange:
+class OrderBook:
+    class Order:
+        def __init__(self, quantity, price, player):
+            self.quantity = quantity
+            self.price = price
+            self.player = player
+
     orders = []
 
-    def get_job(self, stamina):
-        def divide():
-            order.quantity -= stamina
-            return Order(stamina, order.price, order.player)
+    def __init__(self, upper):
+        def find_border_from_upper(price):
+            for order in self.orders:
+                if order.price > price:
+                    return order
+        def find_border_from_lower(price):
+            for order in self.orders:
+                if order.price < price:
+                    return order
+        self.upper = upper
+        if upper:
+            self.find_border = find_border_from_upper
+        else:
+            self.find_border = find_border_from_lower
 
-        jobs = []
-        for order in self.orders.copy():
-            if order.quantity < stamina:
-                jobs.append(order)
-                stamina -= order.quantity
-                self.orders.remove(order)
-            else:
-                divided_order = divide()
-                jobs.append(divided_order)
+    def append_order(self, quantity, price, player):
+        border_order = self.find_border(price)
 
 
-class Order:
-    def __init__(self, quantity, price, player):
-        self.quantity = quantity
-        self.price = price
-        self.player = player
+class LaborExchange:
+    order_book = OrderBook()
+
+    def get_jobs(self):
+        return self.orders.copy()
 
 
 class SimulationEnvironment:
@@ -163,10 +178,12 @@ class SimulationEnvironment:
 
     class Workbench:
         def stamina(self, time):
-            if time.use():
+            if time > 0:
+                time - 1
                 return 1
             else:
                 return 0
+
 
 class SimulationThread(threading.Thread):
     def __init__(self):
