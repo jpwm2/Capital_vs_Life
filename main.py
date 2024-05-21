@@ -9,8 +9,8 @@ class MoneyTree:
     stamina = 1
     times = 1
 
-    def recover(self, workbench):
-        self.stamina = workbench.stamina(self.times)
+    def recover(self):
+        self.stamina = 1
 
 
 class Land(MoneyTree):
@@ -18,6 +18,19 @@ class Land(MoneyTree):
 
     def __init__(self):
         super().__init__()
+
+    def make_harvest(self,work_load):
+        food = 0
+        if work_load > self.stamina:
+            food = self.stamina
+            self.stamina = 0
+            work_load -= self.stamina
+            food = harvest_amount * self.stamina;
+        else:
+            food = work_load
+            self.stamina -=work_load
+            work_load = 0
+        return
 
 
 class Machine(MoneyTree):
@@ -47,6 +60,11 @@ class Person(MoneyTree):
             self.inheritance_active = determine_active(seed, 3, self.range4)
             self.capital_emphasis = determine_active(seed, 4, self.range5)
 
+    class Job:
+        def __init__(self, quantity, to_do):
+            self.quantity = quantity
+            self.to_do = to_do
+
     gold = 10
     land = [Land()]
     food = 10
@@ -54,13 +72,32 @@ class Person(MoneyTree):
     product = 0
     utility = 0
     children = []
+    jobs = []
 
     def __init__(self, individuality_seed):
         super().__init__()
         self.individuality = self.Individuality(individuality_seed)
 
-    def get_stamina(self):
-        return self.stamina
+
+    def choose_loan(self, gold):
+        pass
+
+    def check_enough_gold(self, price, stamina):
+        reward = 0
+        for job in self.jobs:
+            if stamina < job.quantity:
+                job.quantity -= stamina
+                reward += stamina * price
+                job.to_do(job.quantity)
+                break
+            elif stamina == job.quantity:
+                self.jobs.remove(job)
+
+        if reward > self.gold:
+            return reward - self.gold;
+        else:
+            return 0
+
 
 
 class InvestmentExchange:
@@ -110,38 +147,65 @@ class LoanBuyExchange(LoanExchange):
 
 class OrderBook:
     class Order:
-        def __init__(self, quantity, price, player):
+        def __init__(self, quantity, price, owner):
             self.quantity = quantity
             self.price = price
-            self.player = player
+            self.owner = owner
 
     orders = []
 
     def __init__(self, upper):
         def find_border_from_upper(price):
-            for order in self.orders:
+            for index, order in enumerate(self.orders):
                 if order.price > price:
-                    return order
+                    return index
+
         def find_border_from_lower(price):
-            for order in self.orders:
+            for index, order in enumerate(self.orders):
                 if order.price < price:
-                    return order
+                    return index
+
         self.upper = upper
         if upper:
             self.find_border = find_border_from_upper
         else:
             self.find_border = find_border_from_lower
 
-    def append_order(self, quantity, price, player):
-        border_order = self.find_border(price)
+    def append_order_value(self, quantity, price, owner):
+        border_index = self.find_border(price)
+        order = self.Order(quantity, price, owner)
+        self.orders.insert(border_index, order)
+
+    def append_order(self, order):
+        border_index = self.find_border(order.price)
+        self.orders.insert(border_index, order)
+
+    def get_orders(self):
+        return self.orders
+
+    def divide_order(self, order, quantity):
+        new_order = self.Order(order.price - quantity, order.price, order.owner)
+        order.price = quantity
+        self.orders.insert(self.orders.index(order), new_order)
 
 
 class LaborExchange:
-    order_book = OrderBook()
+    order_book = OrderBook(True)
 
-    def get_jobs(self):
-        return self.orders.copy()
+    def get_jobs(self, stamina):
+        chosen_jobs = []
+        for job in self.order_book.get_jobs():
+            if stamina < job.quantity:
+                self.order_book.divide(job, stamina)
+                chosen_jobs.append(job)
+                break
+            elif stamina == job.quantity:
+                chosen_jobs.append(job)
+                break
+            else:
+                chosen_jobs.append(job)
 
+        return chosen_jobs
 
 class SimulationEnvironment:
     num_people = 243
@@ -176,13 +240,6 @@ class SimulationEnvironment:
         initialize_people()
         initialize_exchanges()
 
-    class Workbench:
-        def stamina(self, time):
-            if time > 0:
-                time - 1
-                return 1
-            else:
-                return 0
 
 
 class SimulationThread(threading.Thread):
@@ -193,10 +250,13 @@ class SimulationThread(threading.Thread):
         self.environment = SimulationEnvironment()
 
     def run(self):
+        def updateEnvironment():
+            pass
         while not self._stop_event.is_set():
             random.shuffle(self.environment.shuffled_people)
             for person in self.environment.shuffled_people:
                 self.one_day(person)
+            updateEnvironment();
 
     def stop(self):
         self._stop_event.set()
@@ -205,19 +265,19 @@ class SimulationThread(threading.Thread):
         return self.environment
 
     def one_day(self, person):
-        def work():
-            def find():
-                jobs = self.environment.labor_exchange.get_job()
+        def get_gold():
+            def work():
+                def job_owner_routine():
 
-            def run():
+                chosen_jobs = self.environment.labor_exchange.get_jobs(person.stamina)
+                for job in chosen_jobs:
+                    person.gold += job.owner.make_work(job.quantity, job.price)
+
+            def sell():
                 pass
 
-            def receive():
-                pass
-
-            find()
-            run()
-            receive()
+            work()
+            sell()
 
         def eat():
             def find():
@@ -232,6 +292,9 @@ class SimulationThread(threading.Thread):
             find()
             pay()
             run()
+
+        def settle():
+            pass
 
         def invest():
             def judge():
@@ -261,8 +324,9 @@ class SimulationThread(threading.Thread):
             pay()
             run()
 
-        work()
+        get_gold()
         eat()
+        settle()
         invest()
         play()
 
