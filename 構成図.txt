@@ -1,0 +1,14 @@
+Database
+GUI
+Middleware
+	Items
+		items.py
+		Environment
+		Human
+			__init__.py
+			human.py
+		Object
+	Recipe
+		recipe.py
+	RecipeData
+		recipe_data.py
