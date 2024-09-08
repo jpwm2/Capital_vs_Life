@@ -1,0 +1,8 @@
+クラス名
+Utility
+
+メソッド
+consume_item(item_id, quantity)
+
+機能
+アイテムを消化して効用を得る
