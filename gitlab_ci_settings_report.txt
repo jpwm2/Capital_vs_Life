@@ -1,0 +1,595 @@
+================================================================================
+ GitLab CI 設定 総まとめ  ―  プロジェクト / Runner / パイプライン / Windows
+================================================================================
+ 対象プロジェクト : gaio-technology/ci  (ID 80327336)
+ 対象ブランチ     : test-refactor
+ 調査日           : 2026-08-19
+ 調査方法         : GitLab REST API v4 + 過去8時間分のジョブログ330件の実測解析
+                    （リポジトリへの変更・パイプラインの起動は一切行っていない）
+
+ 凡例
+   [PERF]  パイプライン速度に影響する項目
+   [!]     セキュリティ上の指摘
+   (実測)  ログ/APIから実際に観測した値
+   (推定)  直接読めないため観測データから逆算した値
+
+
+================================================================================
+ 0. 最初に：config.toml が「読めなかった」件
+================================================================================
+C:/Gitlab-Runner/config.toml の中身は取得できませんでした。
+
+理由：
+  このセッションはクラウド上の Linux コンテナで動いており、Runner が稼働している
+  Windows マシン (G23R0480C) とはネットワーク的に一切つながっていません。
+  C: ドライブは存在せず、GitLab API にも config.toml を返すエンドポイントはありません。
+  ファイルを読むには当該 Windows 上でコマンドを実行する必要がありますが、それには
+  ci 配下の YAML/スクリプト追加・変更が必須で、今回の制約（ci配下は閲覧のみ、
+  スクリプト変更禁止）に反するため実施していません。
+
+代わりに行ったこと：
+  ジョブログ330件の挙動から config.toml の主要設定を逆算しました（第4章）。
+  concurrent と limit については、8時間分の全ジョブの開始/終了時刻を突き合わせた
+  実測なので、値としてはほぼ確定的です。
+  第4章の末尾に「手元で確認していただきたい項目リスト」を付けています。
+
+
+================================================================================
+ 1. GitLab プロジェクト設定
+================================================================================
+ パス                      gaio-technology/ci
+ プロジェクトID            80327336
+ デフォルトブランチ        main
+ 可視性                    private
+ リポジトリサイズ          20.90 MB
+ 成果物(artifacts)合計     230.58 MB
+ ストレージ合計            251.48 MB
+ LFS                       有効 (lfs_objects_size = 0 MB / 実質未使用)
+ Auto DevOps               無効
+ CI設定ファイル            .gitlab-ci.yml (デフォルト)
+
+ --- CI/CD 実行設定 ---------------------------------------------------------
+ build_timeout                     14400 秒 (4時間)
+ build_git_strategy                fetch                                [PERF]
+ ci_default_git_depth              20                                   [PERF]
+ auto_cancel_pending_pipelines     disabled                             [PERF]
+ shared_runners_enabled            true （ただし全ジョブがタグ指定のため未使用）
+ group_runners_enabled             true （グループRunnerは0台）
+ ci_separated_caches               true
+ keep_latest_artifact              true
+ max_artifacts_size                未設定（インスタンス既定）
+ ci_job_token_scope_enabled        false
+ ci_push_repository_for_job_token  false
+ restrict_user_defined_variables   true
+ ci_pipeline_variables_minimum_override_role
+                                   no_one_allowed
+                                   → 手動実行時に変数を渡せない設定
+
+ --- マージ / ブランチ保護 ---------------------------------------------------
+ merge_method                              merge
+ only_allow_merge_if_pipeline_succeeds     false
+ only_allow_merge_if_all_discussions_resolved  false
+ remove_source_branch_after_merge          true
+ squash_option                             default_off
+ 保護ブランチ                              main のみ
+   - push 権限   : Maintainers (40)
+   - merge 権限  : Maintainers (40)
+   - force push  : 禁止
+   - code owner 承認 : 不要
+ push rules                                未設定 (404)
+
+ --- メンバー ---------------------------------------------------------------
+ x_f    (Kosaku Fukuma)  Owner (50)
+ F7498  (功作 福間)      Maintainer (40)
+ ※ グループ gaio-technology 経由で access_level 50 が付与されている
+
+
+================================================================================
+ 2. CI/CD 変数
+================================================================================
+ --- プロジェクト変数（6件）------------------------------------------------
+ KEY                            VALUE          protected masked raw scope
+ READ_ONLY                      <62文字・伏字>  false     false  false  *   [!]
+ MAX_TESTCASES_GENERATION_TIME  300            false     false  false  *   [PERF]
+ DEBUG_CHECK_SCRIPT_ERROR       0              false     false  false  *
+ DEBUG_CHECK_JUDGE_SUCCESS      1              false     false  false  *
+ DEBUG_BTOB_SCRIPT_ERROR        0              false     false  false  *
+ DEBUG_BTOB_JUDGE_FAILURE       0              false     false  false  *
+
+ [!] READ_ONLY は GitLab の Personal Access Token (glpat-...) が
+     masked=false / protected=false / hidden=false の平文で入っています。
+     ・Maintainer 以上なら UI で値がそのまま読める
+     ・ジョブログに echo されれば伏字化されずに出力される
+     ・全ブランチ・全環境スコープ (*) で使える
+     用途は ci/Jobs/Shared/GitLab/Get-PrevPipelineSha.ps1 が前回パイプラインの
+     SHA を引くためだけ。最低でも masked=true 化、可能なら
+     CI_JOB_TOKEN か Project Access Token への置き換えを推奨します。
+
+ --- グループ変数（gaio-technology / 1件）-----------------------------------
+ GITLAB_OBSERVABILITY_EXPORT = traces,metrics,logs   (protected/masked ともに false)
+
+ --- .gitlab-ci.yml で定義される変数 ----------------------------------------
+ GIT_CLEAN_FLAGS  = "-ffdx -e /Workspace/"                              [PERF]
+ MATLAB_ROOT      = C:\Program Files\MATLAB\R2024a
+
+ --- ci/Inputs/variables.yml -------------------------------------------------
+ DEBUG_CHECK_JUDGE_SUCCESS = "1"   （guideline-check のみ include）
+
+ --- 各ジョブ共通のジョブ変数 -----------------------------------------------
+ GET_SOURCES_ATTEMPTS = "5"        （全5ジョブ）
+ GIT_CLONE_PATH       = "$CI_BUILDS_DIR/$CI_CONCURRENT_ID/s"            [PERF]
+                        （create-harness-model / create-testcases-from-model /
+                          btob-test の3ジョブのみ。decide-targets と
+                          guideline-check には未設定）
+ ALL_MODELS_BRANCH    = "main"     （decide-targets のみ）
+ パイプラインスケジュール : 0件
+
+
+================================================================================
+ 3. Runner（GitLab 側から見える設定）
+================================================================================
+ このプロジェクトに登録されたプロジェクト専用 Runner は4台。
+ グループRunnerは0台。共有Runner（GitLab.com SaaS）は有効だが、全ジョブが
+ 自前Runnerにしか無いタグを要求するため実際には一度も使われていない。
+
+ --- 稼働中（2台）-----------------------------------------------------------
+ [Runner1]  ID 53049374
+   ログ上の名前     Runner1   (トークン先頭 DuyqxYaFu)
+   状態             online / active / 未ロック
+   登録日           2026-05-07
+   バージョン       gitlab-runner 18.10.1 (3b43bf9f)
+   プラットフォーム windows / amd64
+   タグ             shell, matlab, no-gaio-tool, powershell, simulink,
+                    sldv, model-advisor, embedded-coder, noB2B
+   run_untagged     false
+   maximum_timeout  未設定（＝プロジェクトの4時間が適用）
+   access_level     not_protected
+   担当ジョブ       decide-targets / guideline-check /
+                    create-testcases-from-model
+   builds_dir       C:\GitLab-Runner\b2   (実測)
+   最大同時実行     4 （実測。第4章参照）                                [PERF]
+
+ [Runner2]  ID 52680622
+   ログ上の名前     Runner2   (トークン先頭 eekR0tkFA)
+   状態             online / active / 未ロック
+   登録日           2026-04-14
+   バージョン       gitlab-runner 18.10.1 (3b43bf9f)
+   プラットフォーム windows / amd64
+   タグ             gaio_tool, gaio-tool, shell, matlab, powershell,
+                    simulink, sldv, model-advisor, embedded-coder
+   run_untagged     false
+   maximum_timeout  未設定
+   access_level     not_protected
+   担当ジョブ       create-harness-model / btob-test-by-model-testcases
+   builds_dir       C:\GitLab-Runner\b1   (実測)
+   最大同時実行     1 （実測。ここが最大のボトルネック）                 [PERF]
+
+ --- 停止中（2台・paused）---------------------------------------------------
+ [予備A]  ID 53424454  paused  ver 18.8.0 (9ffb4aa0)  windows/amd64
+          タグ: shell, matlab, gaio-tool, gaio_tool, powershell,
+                simulink, sldv, model-advisor, embedded-coder
+          → Runner2 と同じ役割の予備機
+ [予備B]  ID 53424522  paused  ver 18.8.0 (9ffb4aa0)  windows/amd64
+          タグ: shell, matlab, no-gaio-tool, powershell, simulink,
+                sldv, model-advisor, embedded-coder, noB2B
+          → Runner1 と同じ役割の予備機
+ ※ 2台とも最終通信 2026-08-19 12:37 頃。プロセスは生きているが paused。
+    この2台を再開すれば並列度が上がる余地がある。                       [PERF]
+
+ --- 重要な事実：Runner1 と Runner2 は同一の物理マシン ----------------------
+ 両方のジョブログで
+     system ID : s_d6d5e28bfc7f   （完全一致）
+     Running on G23R0480C          （完全一致）
+ つまり1台の Windows 上で gitlab-runner が2つの Runner エントリを持って
+ 動作しており、config.toml も1つ、CPU/メモリ/ディスクも共有です。
+ 「Runner1とRunner2で並列化されている」ように見えても、実体は同じ
+ マシンのリソースを奪い合っています。                                   [PERF]
+
+
+================================================================================
+ 4. Runner config.toml（実測からの逆算）
+================================================================================
+ ★ 実ファイルは読めていません。以下は挙動から確定/推定した内容です。
+
+ --- 実測で確定している値 ---------------------------------------------------
+ concurrent = 4                                                        [PERF]
+   根拠: 8時間・330ジョブの開始/終了時刻を突き合わせた結果、このマシン上で
+         同時に走ったジョブ数の最大は「ちょうど4」。5以上は一度もなし。
+         観測された内訳:
+            Runner1×4                   … 69秒間
+            Runner1×3 + Runner2×1       … 155秒間
+            Runner1×3                   … 3214秒間
+            Runner1×2 + Runner2×1       … 908秒間  ほか
+
+ [[runners]] Runner2 (ID 52680622) の limit = 1                        [PERF]
+   根拠: 全123ジョブを通じて同時実行数が2になった瞬間が一度もない。
+         さらに Runner2 で30秒以上待たされたジョブ41件のうち36件は、
+         マシン全体のジョブ数が3以下（＝concurrent=4に余裕がある）状態で
+         待たされていた。よって concurrent ではなく Runner2 自身の
+         limit=1 が原因と断定できます。
+         実測の待ち時間: create-testcases-from-model 最大 634秒、
+                         btob-test 最大 413秒、create-harness-model 最大 265秒。
+
+ [[runners]] Runner1 (ID 53049374) の limit >= 4（おそらく 4 または 0=無制限）
+   根拠: 同時4本の実行を観測。
+
+ --- 実測から確定している他の項目 -------------------------------------------
+ [[runners]] name       = "Runner1" / "Runner2"
+ executor               = "shell"          （ログ: Preparing the "shell" executor）
+ shell                  = "powershell"     （ログ: Using Shell (powershell) executor）
+                          ※ pwsh ではなく Windows PowerShell 5.1
+ Runner1 builds_dir     = "C:\\GitLab-Runner\\b2"
+ Runner2 builds_dir     = "C:\\GitLab-Runner\\b1"
+ url                    = "https://gitlab.com/"
+ 実行アカウント         kuno.s  （C:\Users\kuno.s\... がジョブから見えている）
+
+ --- 実測されたビルドディレクトリの実例 -------------------------------------
+ Runner1 / GIT_CLONE_PATH なしのジョブ:
+     C:\GitLab-Runner\b2\DuyqxYaFu\0\gaio-technology\ci
+     C:\GitLab-Runner\b2\DuyqxYaFu\1\gaio-technology\ci
+ Runner1 / GIT_CLONE_PATH ありのジョブ:
+     C:\GitLab-Runner\b2\0\s
+ Runner2 / GIT_CLONE_PATH ありのジョブ:
+     C:\GitLab-Runner\b1\0\s
+
+ → 同じ Runner1 の中で「デフォルトパス」と「GIT_CLONE_PATH」の2系統の
+    作業コピーが併存しています。さらにデフォルトパス側は同時実行スロット
+    ごと（\0\ \1\ ...）に別ディレクトリへ展開されるため、concurrent=4 なら
+    最大で 4(デフォルト) + 4(clone_path) = 8個のリポジトリ作業コピーが
+    Runner1 上にできます。新しいスロットに初めて入ったジョブは fetch では
+    なく全クローンになります。                                          [PERF]
+
+ --- 読めていない＝手元で確認していただきたい項目 ---------------------------
+ 以下は config.toml を開かないと分からない項目です。性能への効き目が大きい
+ 順に並べています。
+   1. [[runners]] limit             ← Runner2 が本当に 1 か（最重要）
+   2. concurrent                    ← 4 かどうかの確認
+   3. check_interval                ← ジョブ取得のポーリング間隔（既定3秒）
+   4. [runners.custom_build_dir] enabled
+                                    ← GIT_CLONE_PATH が効いているので true のはず
+   5. builds_dir / cache_dir        ← b1 / b2 は確定。cache_dir は不明
+   6. output_limit                  ← ログ上限(既定4096KB)
+   7. request_concurrency           ← 既定1
+   8. shell = "powershell" の明示有無
+   9. environment = [...]           ← Runner側で環境変数を注入しているか
+  10. [runners.feature_flags]       ← FF_ 系の設定有無
+  11. session_server / listen_address
+  12. log_level / log_format
+  13. sentry_dsn, connection_max_age, shutdown_timeout
+
+
+================================================================================
+ 5. パイプライン YAML
+================================================================================
+ --- ファイル構成 -----------------------------------------------------------
+ .gitlab-ci.yml                                        (66行, ルート)
+  ├ include: ci/Jobs/DecideTargets/decide-targets.gitlab-ci.yml      (92行)
+  ├ include: ci/Jobs/GuidelineCheck/guideline-check.gitlab-ci.yml    (66行)
+  │            └ include: ci/Inputs/variables.yml                    (2行)
+  ├ include: ci/Jobs/CreateHarnessModel/create-harness-model.gitlab-ci.yml (73行)
+  ├ include: ci/Jobs/CreateTestcases/create-testcases.gitlab-ci.yml  (69行)
+  └ include: ci/Jobs/BtoBTest/btob-test.gitlab-ci.yml               (112行)
+
+ ci/ 配下の総ファイル数 248 (.m 133, .ini 18, .txt 12, .dat 12, .ps1 7,
+ .yml 6, .xml 6, ...)
+
+ --- workflow ルール（ルート）----------------------------------------------
+ 1. ブランチ + MRオープン中 + source=web  → 実行
+ 2. ブランチ + MRオープン中 + source=api  → 実行
+ 3. ブランチ + MRオープン中（上記以外）   → never（push では動かない）
+ 4. それ以外                              → 実行
+ ※ webide は現在コメントアウト（許可されていない）
+
+ --- stages -----------------------------------------------------------------
+ decide-targets → guideline-check → create-testcases → btob-test
+ （create-harness-model は create-testcases ステージに同居）
+
+ --- ジョブ一覧 -------------------------------------------------------------
+ (1) decide-targets            stage: decide-targets
+     tags       : shell, noB2B                     → Runner1 のみが該当
+     needs      : なし
+     artifacts  : targets.yml (when: always)
+     retry      : max 2 / runner_system_failure
+     variables  : ALL_MODELS_BRANCH=main, GET_SOURCES_ATTEMPTS=5
+     処理       : Get-PrevPipelineSha.ps1 で前回SHA取得 →
+                  MATLAB で makeTargetsChanged を実行し targets.yml 生成
+     分岐       : MRオープン中 / MRパイプライン / mainブランチ → 全モデル対象
+                  それ以外 → 変更モデルのみ
+
+ (2) guideline-check           stage: guideline-check
+     tags       : shell, noB2B                     → Runner1 のみ
+     needs      : decide-targets (artifacts あり)
+     artifacts  : "*Result/**" (when: always) + codequality: code-quality.xml
+     retry      : max 2 / runner_system_failure
+     処理       : MATLAB で guidelineCheckJob（Model Advisor / 社内ガイドライン）
+     include    : ci/Inputs/variables.yml
+
+ (3) create-harness-model      stage: create-testcases
+     tags       : shell, powershell, matlab, simulink, gaio-tool
+                                                   → Runner2 のみ
+     needs      : decide-targets (artifacts), guideline-check (artifactsなし)
+     artifacts  : "*Results/**" (when: always)
+     variables  : GIT_CLONE_PATH, GET_SOURCES_ATTEMPTS=5
+     retry      : max 2 / runner_system_failure
+     処理       : Clear-WorkspaceContents.ps1 → MATLAB で createHarnessModelJob
+
+ (4) create-testcases-from-model   stage: create-testcases
+     tags       : shell, powershell, matlab, simulink, sldv, no-gaio-tool
+                                                   → Runner1 のみ
+     needs      : decide-targets (artifacts), create-harness-model (artifacts)
+     artifacts  : "*Results/**" (when: always)
+     variables  : GIT_CLONE_PATH, GET_SOURCES_ATTEMPTS=5
+     retry      : max 2 / runner_system_failure
+     処理       : MATLAB で createTestcasesFromModelJob（SLDV）
+
+ (5) btob-test-by-model-testcases  stage: btob-test
+     tags       : shell, gaio_tool                 → Runner2 のみ
+     needs      : decide-targets (artifacts), create-testcases-from-model (artifacts)
+     artifacts  : "*Results/**" (when: always) + junit: btob-test-report.xml
+     variables  : GIT_CLONE_PATH, GET_SOURCES_ATTEMPTS=5
+     retry      : max 2 / runner_system_failure
+     処理       : Clear-WorkspaceContents.ps1 → MATLAB で
+                  runBtoBTestByModelTestcasesJob（GAIO WinAMS 連携）
+     コメントアウト中: btob-test-by-code-testcase
+
+ --- 依存関係（実行順）------------------------------------------------------
+   decide-targets
+        └→ guideline-check
+                 └→ create-harness-model
+                          └→ create-testcases-from-model
+                                   └→ btob-test-by-model-testcases
+
+ 5ジョブが完全な一直線。並列に走れるジョブが1つもありません。      [PERF]
+ かつ Runner1 → Runner1 → Runner2 → Runner1 → Runner2 と
+ 2台を交互にまたぐため、ジョブごとに毎回チェックアウトし直しています。 [PERF]
+
+ --- タグとRunnerの対応（各ジョブが1台に固定されている）---------------------
+   ジョブ                        必要タグの決め手      実行可能Runner
+   decide-targets                noB2B                 Runner1 のみ
+   guideline-check               noB2B                 Runner1 のみ
+   create-harness-model          gaio-tool             Runner2 のみ
+   create-testcases-from-model   no-gaio-tool          Runner1 のみ
+   btob-test-by-model-testcases  gaio_tool             Runner2 のみ
+ ※ gaio-tool（ハイフン）と gaio_tool（アンダースコア）の2種類が混在。
+    Runner2 は両方を持っているため現状は動いていますが、予備機を追加する
+    際に片方だけ付け忘れると即座にジョブが刺さります。
+
+ --- 共通スクリプト（ci/Jobs/Shared）----------------------------------------
+ matlab_utf8.ps1              MATLABのCP932出力をUTF-8に変換して中継。
+                              cmd /c 経由でログをファイルにため、MATLAB終了後に
+                              まとめて出力（＝実行中はログが流れない）。   [PERF]
+ Clear-WorkspaceContents.ps1  Workspace配下を自力で削除。ロック中のフォルダは
+                              空のまま残す設計。
+ Get-PrevPipelineSha.ps1      READ_ONLY トークンで前回パイプラインのSHAを取得。
+                              Machine スコープの HTTPS_PROXY/NO_PROXY を
+                              プロセスに反映してから curl.exe を実行。
+ LockDiag.ps1 / Invoke-LockDiag.ps1 / Remove-LockedBuildFolder.ps1 /
+ Stop-StrayGaioProcesses.ps1  ファイルロック調査用（2026-08-06にCI本体からは
+                              呼び出しを削除済み。ファイルは残存）。
+
+
+================================================================================
+ 6. 稼働している Windows マシン
+================================================================================
+ ホスト名             G23R0480C
+ OS                   Windows (x64) ※ビルド番号はログから特定不可
+ ドメイン             nb.gaio.co.jp（AD: gaio-ad02.nb.gaio.co.jp）
+ 実行ユーザー         kuno.s
+ タイムゾーン         JST (UTC+09:00)
+ gitlab-runner        18.10.1 (3b43bf9f) / Go 1.25.7 / windows-amd64
+                      ビルド日 2026-04-05、ブランチ 18-10-stable
+ シェル               Windows PowerShell 5.1（executor=shell, shell=powershell）
+ システムロケール     日本語 (CP932/Shift-JIS)
+ git-lfs              3.7.1 (windows amd64; go 1.25.1; git b84b3384)
+
+ --- インストール済みツール -------------------------------------------------
+ MATLAB               R2024a
+                      C:\Program Files\MATLAB\R2024a
+                      prefdir: C:\Users\kuno.s\AppData\Roaming\MathWorks\MATLAB\R2024a
+                      matlab.prf 77行
+ MathWorks ServiceHost v2026.8.0.4
+                      C:\Users\kuno.s\AppData\Local\MathWorks\ServiceHost\...
+                      config.json: "isDduxEnabled": true                  [PERF]
+ Simulink 系          Simulink, Simulink Design Verifier (SLDV),
+                      Model Advisor, Embedded Coder
+                      （Runnerタグから。両Runnerとも同じ構成）
+ GAIO ツール          WinAMS / CasePlayer2 系
+                      （ci/Jobs/.../Resources に WinAMS.INI, CP2Proj.*,
+                        winams.ctrl 等の設定ファイル一式）
+
+ --- ネットワーク（matlab-startup-dns 診断ジョブの実測より）-----------------
+ NIC / DNS
+   CatoNetworks (SDPクライアント) : 192.168.40.11, 192.168.10.100
+   イーサネット                   : 192.168.1.1
+   Wi-Fi                          : 192.168.1.113, 192.168.128.21
+ プロキシ             Machineスコープの環境変数 HTTPS_PROXY / HTTP_PROXY /
+                      NO_PROXY を使用（Get-PrevPipelineSha.ps1 が明示的に読込）
+ 外向き通信先（観測） gitlab.com, cdn.artifacts.gitlab-static.net,
+                      www.mathworks.com, udc-service.mathworks.com,
+                      tunnel-api.catonetworks.com,
+                      wpad（名前解決失敗）, login.microsoftonline.com,
+                      settings-win.data.microsoft.com,
+                      *.update.microsoft.com, *.google.com 系
+
+ --- セキュリティソフト -----------------------------------------------------
+ Microsoft Defender (MsMpEng.exe) および
+ Microsoft Defender for Endpoint (MsSense.exe, SenseCncProxy.exe),
+ NisSrv.exe, SecurityHealthService.exe が常駐
+ （ci/Jobs/Shared/LockDiag.ps1 の「絶対にkillしないプロセス」一覧より）  [PERF]
+
+ --- MATLAB 起動/終了の実測（matlab-startup-dns ジョブ, 3回×4モード）-------
+   モード     起動      終了
+   cold      7.9〜11.0s  12.8〜13.3s
+   warmps    8.3〜10.3s  13.2〜13.2s
+   warmml    9.9〜11.1s  13.2〜13.3s
+   noflush   8.6〜 8.6s  25.3〜26.3s
+ 終了時に必ず DNS 解決が走っており、これが終了時間を支配しています:
+   wpad@+20〜23秒, www.mathworks.com@+20〜23秒,
+   udc-service.mathworks.com@+30秒, login.microsoftonline.com@+19秒 など
+
+
+================================================================================
+ 7. 実測パフォーマンス
+================================================================================
+ --- 基準にしたパイプライン -------------------------------------------------
+ ID 2772597370 / ブランチ test-refactor / success / 対象モデル1件
+ (models/M_DrvDreBat0/M_DrvDreBat00.slx)
+ 全体所要 : 約 599 秒（9分59秒）
+
+ --- ジョブ別 内訳（秒）-----------------------------------------------------
+ ジョブ                        合計  準備  取得  DL成果物 MATLAB起動 MATLAB処理 MATLAB終了 UL成果物
+ decide-targets                  37     1     7      0        8.5        5.1       6.7      7
+ guideline-check                 224     0     6      2        8.4      193.1       8.3      4
+ create-harness-model             55     1     6      3        7.7       22.6       9.2      2
+ create-testcases-from-model      92     0     6      2        7.3       55.4      16.1      3
+ btob-test-by-model-testcases    174     1     6      3        7.8      138.1      12.1      4
+ ----------------------------------------------------------------------------
+ 合計                            582     3    31     10       39.7      414.2      52.3     20
+
+ ※ create-harness-model だけ [MEASURE] PS_BEFORE_MATLAB のログが出力されて
+    いなかったため、この行の「MATLAB起動 7.7秒」のみ ws-clean 完了時刻からの
+    概算です。他の4ジョブはマーカー間の実測値です。
+
+ --- 599秒の使われ方 --------------------------------------------------------
+   MATLAB内の実処理          414.2 秒   69 %
+   MATLAB 起動+終了           92.0 秒   15 %   ← 5回別々に起動している [PERF]
+   git fetch (get_sources)    31   秒    5 %
+   成果物 アップロード        20   秒    3 %
+   成果物 ダウンロード        10   秒    2 %
+   キュー待ち + 準備 + 後始末 約32 秒    5 %
+ → MATLAB の実処理以外の固定オーバーヘッドが 1パイプラインあたり
+    約 185 秒（全体の31%）。ジョブ1本あたり約37秒。
+
+ --- ジョブ別 統計（当日330ジョブ）-----------------------------------------
+ Runner  ジョブ                        件数  実行中央値  実行最大  待ち中央値  待ち最大
+ R1      decide-targets                 81     31.7s     77.2s      1.8s     52.3s
+ R1      guideline-check                74    220.8s    294.1s      2.1s     17.8s
+ R1      create-testcases-from-model    50     94.9s    207.3s      2.0s     12.6s
+ R2      create-harness-model           51     63.4s    202.6s      2.8s    265.3s [PERF]
+ R2      create-testcases-from-model    11     86.2s    110.2s      3.2s    634.1s [PERF]
+ R2      btob-test-by-model-testcases   61    147.5s    259.7s      3.3s    412.9s [PERF]
+
+ --- 成果物サイズ（中央値）-------------------------------------------------
+ btob-test-by-model-testcases   0.57 MB
+ create-testcases-from-model    0.40 MB
+ create-harness-model           0.17 MB
+ guideline-check                0.09 MB
+ decide-targets                 0.01 MB
+ → いずれも小さく、成果物の転送量自体は問題になっていません。
+
+ --- 同時に3本pushしたときの実測（10:36台の3パイプライン）------------------
+ Runner1 側は decide-targets 3本、guideline-check 3本が同時に走ったが、
+ Runner2 側は完全に1本ずつ直列化され、後続は 64秒 → 90秒、
+ btob では 60秒 → 172秒 → 216秒 と待ち時間が雪だるま式に増加。
+ 3本目のパイプラインは完了まで 17分38秒（単独実行時の約1.8倍）。   [PERF]
+
+
+================================================================================
+ 8. [PERF] パフォーマンスに効く項目まとめ（影響が大きい順）
+================================================================================
+ (1) Runner2 の limit = 1  ―― 最大のボトルネック
+     create-harness-model と btob-test が1本ずつしか流れない。実測で最大
+     634秒の待ち。複数パイプラインが並ぶと待ち時間が加算的に伸びる。
+     config.toml の該当 [[runners]] の limit を上げるのが最も効果が大きい。
+     ただし (2) の制約に注意。
+
+ (2) Runner1 と Runner2 が同一マシン（system ID s_d6d5e28bfc7f）
+     limit を上げても CPU / メモリ / ディスク / MATLABライセンスを
+     奪い合うため、素直にスループットが倍にはならない。
+     paused の予備Runner 2台（53424454 / 53424522）を別マシンで再開する方が
+     筋が良い。
+
+ (3) 5ジョブが完全直列 + 実行Runnerが交互
+     R1→R1→R2→R1→R2 と行き来するため、ジョブごとに
+     「git fetch + 成果物DL + MATLAB起動 + MATLAB終了 + 成果物UL」の
+     固定費 約37秒 を毎回払っている（合計 約185秒 / 全体の31%）。
+     特に guideline-check（193秒）は create-harness-model を
+     ブロックしているが、成果物を渡していない（needs に artifacts 指定なし）。
+
+ (4) MATLAB を5回別々に起動している（起動39.7秒 + 終了52.3秒 = 92秒）
+     終了処理が DNS 解決待ちで長い。診断ジョブの実測では
+     wpad / www.mathworks.com / udc-service.mathworks.com の解決に
+     20〜30秒かかっている。
+     - MathWorks ServiceHost の DDUX テレメトリが有効（isDduxEnabled: true）
+     - wpad は名前解決に失敗し続けている（WPAD自動検出が無効化されていない）
+     これらを止める / hosts か NO_PROXY で潰すだけで1ジョブ数秒〜十数秒短縮。
+
+ (5) GIT_CLEAN_FLAGS = "-ffdx -e /Workspace/"
+     Workspace 以外は毎回全消しになるため、実際のログで
+        Removing models/M_DrvDreBat0/slprj/
+        Removing models/M_DrvDreBat0/M_DrvDreBat00.slxc
+     が毎ジョブ発生している。Simulink のビルドキャッシュ（slprj / .slxc）が
+     毎回破棄され、フルリビルドになっている。ここは伸びしろが大きい。
+
+ (6) 作業コピーが分散している
+     decide-targets と guideline-check だけ GIT_CLONE_PATH 未設定のため
+     デフォルトパス（スロット番号ごとに別ディレクトリ）を使う。
+     concurrent=4 だと Runner1 上に最大8個のリポジトリ作業コピーができ、
+     初回のスロットでは fetch ではなく全クローンになる。
+     全ジョブで GIT_CLONE_PATH を揃えると、fetch 差分が効いて安定する。
+
+ (7) auto_cancel_pending_pipelines = disabled かつ interruptible 未設定
+     連続 push すると古いパイプラインが最後まで走り続け、
+     limit=1 の Runner2 を占有する。当日80件超のパイプラインが流れており、
+     影響は小さくない。
+
+ (8) Windows Defender / Defender for Endpoint が常駐
+     C:\GitLab-Runner\b1, b2 配下と MATLAB のビルド出力（slprj など）は
+     大量の小ファイル生成を伴うため、リアルタイムスキャンの除外設定が
+     入っていないと数十%単位で遅くなる。除外設定の有無は要確認。
+
+ (9) ci_default_git_depth = 20 / build_git_strategy = fetch
+     現状 get_sources は6〜7秒で収まっており、ここは問題なし。
+
+ (10) matlab_utf8.ps1 がMATLAB出力を全バッファ
+     速度そのものへの影響は小さいが、MATLAB実行中はログが一切流れないため
+     長いジョブの進捗が見えず、ハングとの区別がつかない。
+
+ (11) MAX_TESTCASES_GENERATION_TIME = 300
+     テストケース生成の上限時間。create-testcases-from-model の
+     実行時間（中央値95秒・最大207秒）の上限を決めている。
+
+ (12) build_timeout = 14400秒（4時間）
+     Runner 側の maximum_timeout は両機とも未設定のため、この4時間が適用。
+     現状の最長ジョブが約5分なので、ハング時に4時間占有される危険がある。
+     limit=1 の Runner2 で起きると影響が大きい。
+
+
+================================================================================
+ 9. セキュリティ上の指摘
+================================================================================
+ [!] CI/CD変数 READ_ONLY に GitLab の Personal Access Token が平文で格納
+     masked=false / protected=false / hidden=false / scope=* 。
+     ジョブログに出れば伏字化されず、Maintainer以上はUIで閲覧可能。
+     → masked=true 化、または CI_JOB_TOKEN / Project Access Token へ置換を推奨。
+
+ [!] グループ変数 GITLAB_OBSERVABILITY_EXPORT も masked=false（値自体は
+     機密ではないので実害は小さい）。
+
+ (参考) 保護ブランチは main のみ。test-refactor を含む他ブランチは
+        非保護のため、非保護ブランチでも上記の非protected変数が利用可能。
+
+
+================================================================================
+ 付録. 取得方法・確認できなかったもの
+================================================================================
+ 取得できたもの
+   - GitLab REST API v4（プロジェクト設定 / 変数 / Runner / ブランチ /
+     保護設定 / メンバー / パイプライン / ジョブ / ジョブログ / リポジトリ）
+   - ジョブログ 330件（2026-08-19 06:40〜14:43 UTC）の時刻解析
+   - test-refactor ブランチの ci/ 配下 248ファイル（閲覧のみ・変更なし）
+
+ 取得できなかったもの
+   - C:/Gitlab-Runner/config.toml の実ファイル（第0章の理由）
+   - Windows のビルド番号 / CPU / メモリ / ディスク種別
+   - Defender の除外設定の有無
+   - MATLAB のライセンス形態（ローカル / ネットワーク）
+   → いずれも当該Windows上でのコマンド実行が必要で、ci配下の変更なしには
+     取得できません。
+
+ 本調査で行っていないこと
+   - リポジトリへのコミット / ファイル変更
+   - パイプラインの起動（当日80件超のパイプライン分の実測データで足りたため）
+   - Runner の設定変更 / 一時停止解除
+
+================================================================================
